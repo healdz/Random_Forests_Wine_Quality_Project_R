@@ -1,0 +1,239 @@
+---
+title: "Wine Regression Trees Final Project"
+author: "Zane Heald"
+output:
+  pdf_document: default
+  html_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(rsample)    
+library(dplyr)     
+library(rpart)       
+library(rpart.plot)  
+library(ipred)       
+library(caret)
+```
+
+
+```{r}
+#read in data (red and white are seperate csv files)
+dat.red <- read.csv('winequality-red.csv',header = TRUE, sep = ";")
+dat.white <- read.csv('winequality-white.csv',header = TRUE, sep = ";")
+
+#combine two sets with categorical variable indicating red or white
+dat.red$type = 'R'
+dat.white$type = 'W'
+
+dat.wine <- rbind(dat.red,dat.white)
+dat.wine$type = as.factor(dat.wine$type)
+
+```
+
+
+```{r}
+#Overview plots of the data
+g <- ggplot(data = dat.wine) + geom_jitter(aes(x = quality, y = alcohol,color = type))
+g +ggtitle('Distribution of Wine Ranking by Alcohol Content') 
+```
+
+
+
+
+```{r}
+set.seed(07121996)
+
+#create training set / test sets from data at 70/30 split
+split <- initial_split(dat.wine, prop = .7)
+dat.train <- training(split) 
+dat.test <- testing(split)
+
+```
+
+
+```{r}
+#Example of limited regression treemodels to compare to a more advanced regression tree model below
+
+
+#fit the model (no tree pruning)
+m1 <- rpart(
+  formula = quality ~ .,
+  data    = dat.train,
+  method  = "anova",
+  control = list(cp = 0)
+  )
+
+#summary(m1)
+rpart.plot(m1)
+plotcp(m1)
+
+
+#fit the model with basic prining
+m2 <- rpart(
+  formula = quality ~ .,
+  data    = dat.train,
+  method  = "anova",
+  )
+
+rpart.plot(m2)
+plotcp(m2)
+
+```
+
+
+
+
+```{r}
+#create the final iteration of the single model by determining maxdepth and minsplit of the model
+
+#create a list of all coombinations of minsplits and maxdepths 
+set.seed(07121996)
+
+
+hGrid <- expand.grid(
+  minsplit = seq(5, 30, 1),
+  maxdepth = seq(3, 15, 1) #original model found max depth of 6 so check below and above that
+)
+
+nr <- nrow(hGrid)
+
+minMax_info <- data.frame(minSplit = numeric(0), maxDepth = numeric(0), CP = numeric(0), ERROR = numeric(0)) #create a dataframe to store the output values in in order to extract the accurate maxdepth and minsplit
+
+#function to get the complexity parameter
+get_compParam <- function(x) {
+  min    <- which.min(x$cptable[, "xerror"])
+  cp <- x$cptable[min, "CP"] 
+}
+
+# function to get minimum error
+get_minError <- function(x) {
+  min    <- which.min(x$cptable[, "xerror"])
+  xerror <- x$cptable[min, "xerror"]
+}
+  
+#loop through and test the different values of max depth and min split recording the associated CP and MSE
+for (i in 1:nr) {
+  minsplit <- hGrid$minsplit[i]
+  maxdepth <- hGrid$maxdepth[i]
+  model <- rpart(
+    formula = quality ~ .,
+    data    = dat.train,
+    method  = "anova",
+    control = list(minsplit = minsplit, maxdepth = maxdepth)
+   )
+  cp <- get_compParam(model)
+  error <- get_minError(model)
+  minMax_info[i,1] <- minsplit
+  minMax_info[i,2] <- maxdepth
+  minMax_info[i,3] <- round(cp,digits = 6)
+  minMax_info[i,4] <- error
+}
+
+
+#extract max Depth and Min Split based on minimum MSE
+minSplit <- minMax_info[which.min(minMax_info$ERROR),1]
+maxDepth <- minMax_info[which.min(minMax_info$ERROR),2]
+minSplit
+maxDepth
+
+
+
+```
+Where the sinmple model above fit the training data to a max depth of 6 and the default min split of 20 by checking the values that actually minimize error we can see that maxdepth should be set to 7 and minsplit set to 13.
+
+
+
+
+```{r}
+# With the optimized min split and max depth we can now see our optimized singular tree fit to minimize error.
+
+
+optimal_tree <- rpart(
+    formula = quality ~ .,
+    data    = dat.train,
+    method  = "anova",
+    control = rpart.control(maxdepth = maxDepth, minsplit = minSplit)  
+    )
+print(optimal_tree)
+
+rpart.plot(optimal_tree)
+plotcp(optimal_tree)
+
+
+
+pred <- predict(optimal_tree, newdata = dat.test) #predict quality 
+confMat <- table (round(pred,0),dat.test$quality)
+print(confMat)
+RMSE(pred = pred, obs = dat.test$quality) #tells the average difference between predicted and actual (could be smaller....)
+
+```
+
+```{r}
+#with the optimized parameters for an initial model we can use bagging to offset the variance that comes with one tree
+
+# assess 10-70 bagged trees
+numtree <- 70
+
+# create empty vector to store OOB RMSE values
+rmse <- c()
+
+for (i in 10:numtree) {
+  set.seed(07121996)
+  model <- bagging(
+  formula = quality ~ .,
+  data    = dat.train,
+  coob    = TRUE,
+  nbagg   = i,
+  control = rpart.control(maxdepth = maxDepth, minsplit = minSplit)
+)
+  # get OOB error
+  rmse <- c(rmse,model$err)
+}
+
+min(rmse)
+minNumTrees <- which.min(rmse)
+minNumTrees
+
+plot(10:numtree, rmse, type = 'l', ylim=c(.74,.755))
+abline(v = minNumTrees + 9 , col = "red", lty = "dashed")
+
+
+
+```
+
+
+
+
+```{r}
+# With the known number of bags needed determined we could use the ipred bagging function to extract the final model however the Caret train function gives us more flexibility in our folds (as oposed to the OOB error method in bagging) and gives us more options with graphing - this is as follows:
+
+
+set.seed(071296)
+ctrl <- trainControl(method = "cv",  number = 10) 
+
+# CV bagged model
+bagged_cv <- train(
+  quality ~ .,
+  data = dat.train,
+  method = "treebag",
+  trControl = ctrl,
+  importance = TRUE,
+  nbagg = minNumTrees+9
+  )
+
+# assess results
+bagged_cv$finalModel
+
+plot(varImp(bagged_cv)) 
+
+pred <- predict(bagged_cv, newdata = dat.test) #predict quality 
+confMat <- table (round(pred,0),dat.test$quality)
+print(confMat)
+RMSE(pred = pred, obs = dat.test$quality) 
+
+
+```
+
